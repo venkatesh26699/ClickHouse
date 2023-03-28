@@ -191,7 +191,7 @@ void applyOrderForJoin(QueryPlan::Node & node, QueryPlan::Nodes & nodes, const Q
         return;
 
     bool is_read_in_order_optimized = false;
-    if (optimization_settings.read_in_order && optimization_settings.join_in_order)
+    if (optimization_settings.join_in_order)
         is_read_in_order_optimized = optimizeJoinInOrder(node, join_ptr);
 
     auto insert_pre_step = [&nodes, &node](size_t idx, auto step)
@@ -248,7 +248,6 @@ void applyOrderForJoin(QueryPlan::Node & node, QueryPlan::Nodes & nodes, const Q
         if (isInnerOrRight(join_kind))
             left_set->setFiltering(right_set->getSet());
     }
-
     for (size_t i = 0; i < 2; ++i)
     {
         insert_pre_step(i, join_step->createSorting(JoinTableSide(i)));

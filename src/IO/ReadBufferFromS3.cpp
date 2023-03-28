@@ -53,8 +53,9 @@ ReadBufferFromS3::ReadBufferFromS3(
     bool use_external_buffer_,
     size_t offset_,
     size_t read_until_position_,
-    bool restricted_seek_)
-    : ReadBufferFromFileBase(use_external_buffer_ ? 0 : settings_.remote_fs_buffer_size, nullptr, 0)
+    bool restricted_seek_,
+    std::optional<size_t> file_size_)
+    : ReadBufferFromFileBase(use_external_buffer_ ? 0 : settings_.remote_fs_buffer_size, nullptr, 0, file_size_)
     , client_ptr(std::move(client_ptr_))
     , bucket(bucket_)
     , key(key_)
@@ -294,7 +295,8 @@ void ReadBufferFromS3::setReadUntilEnd()
     }
 }
 
-bool ReadBufferFromS3::atEndOfRequestedRangeGuess() {
+bool ReadBufferFromS3::atEndOfRequestedRangeGuess()
+{
     if (!impl)
         return true;
     if (read_until_position)

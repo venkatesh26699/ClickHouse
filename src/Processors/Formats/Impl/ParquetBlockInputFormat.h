@@ -42,7 +42,7 @@ class SeekableReadBufferFactory;
 //
 // For (1), we need the IInputFormat to be in control of reading, with its own implementation of
 // parallel reading+decoding, instead of using ParallelReadBuffer and ParallelParsingInputFormat.
-// That's what MultistreamInputCreator in FormatFactory is about.
+// That's what RandomAccessInputCreator in FormatFactory is about.
 
 class ParquetBlockInputFormat : public IInputFormat
 {
@@ -83,7 +83,8 @@ private:
 
     void threadFunction(size_t row_group_idx);
 
-    struct RowGroupState {
+    struct RowGroupState
+    {
         bool running = false;
         bool done = false; // all chunks were decoded
 
@@ -96,7 +97,8 @@ private:
         std::unique_ptr<ArrowColumnToCHColumn> arrow_column_to_ch_column;
     };
 
-    struct ChunkToDeliver {
+    struct ChunkToDeliver
+    {
         Chunk chunk;
         BlockMissingValues block_missing_values;
         size_t chunk_idx; // within row group
@@ -105,10 +107,12 @@ private:
         // For priority_queue.
         // In ordered mode we deliver strictly in order of increasing row group idx,
         // in unordered mode we prefer to interleave chunks from different row groups.
-        struct Compare {
+        struct Compare
+        {
             bool row_group_first = false;
 
-            bool operator()(const ChunkToDeliver & a, const ChunkToDeliver & b) const {
+            bool operator()(const ChunkToDeliver & a, const ChunkToDeliver & b) const
+            {
                 auto tuplificate = [this](const ChunkToDeliver & c)
                 { return row_group_first ? std::tie(c.row_group_idx, c.chunk_idx)
                                          : std::tie(c.chunk_idx, c.row_group_idx); };

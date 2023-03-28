@@ -61,14 +61,22 @@ ParquetBlockInputFormat::ParquetBlockInputFormat(
 
 ParquetBlockInputFormat::~ParquetBlockInputFormat() = default;
 
-void ParquetBlockInputFormat::initializeIfNeeded() {
+void ParquetBlockInputFormat::initializeIfNeeded()
+{
     if (std::exchange(is_initialized, true))
         return;
 
     if (buf_factory)
-        arrow_file = std::make_shared<RandomAccessFileFromManyReadBuffers>(*buf_factory);
+    {
+        if (buf_factory->checkIfActuallySeekable())
+            arrow_file = std::make_shared<RandomAccessFileFromManyReadBuffers>(*buf_factory);
+        else
+            arrow_file = asArrowFileLoadIntoMemory(*buf_factory->getReader(), is_stopped, "Parquet", PARQUET_MAGIC_BYTES);
+    }
     else
+    {
         arrow_file = asArrowFile(*in, format_settings, is_stopped, "Parquet", PARQUET_MAGIC_BYTES, /* avoid_buffering */ true);
+    }
 
     if (is_stopped)
         return;
@@ -86,7 +94,8 @@ void ParquetBlockInputFormat::initializeIfNeeded() {
     column_indices = field_util.findRequiredIndices(getPort().getHeader(), *schema);
 }
 
-void ParquetBlockInputFormat::prepareRowGroupReader(size_t row_group_idx) {
+void ParquetBlockInputFormat::prepareRowGroupReader(size_t row_group_idx)
+{
     auto & row_group = row_groups[row_group_idx];
 
     parquet::ArrowReaderProperties properties;
@@ -113,7 +122,7 @@ void ParquetBlockInputFormat::prepareRowGroupReader(size_t row_group_idx) {
     properties.set_pre_buffer(true);
     auto cache_options = arrow::io::CacheOptions::LazyDefaults();
     cache_options.hole_size_limit = min_bytes_for_seek;
-    cache_options.range_size_limit = format_settings.parquet.max_bytes_to_read_at_once;
+    cache_options.range_size_limit = 1l << 40; // reading the whole row group at once is fine
     properties.set_cache_options(cache_options);
 
     parquet::arrow::FileReaderBuilder builder;
@@ -368,28 +377,20 @@ NamesAndTypesList ParquetSchemaReader::readSchema()
 
 void registerInputFormatParquet(FormatFactory & factory)
 {
-    factory.registerInputFormat(
+    factory.registerRandomAccessInputFormat(
             "Parquet",
-            [](ReadBuffer & buf,
-               const Block & sample,
-               const RowInputFormatParams &,
-               const FormatSettings & settings)
-            {
-                // TODO: Propagate the last two from settings.
-                return std::make_shared<ParquetBlockInputFormat>(&buf, nullptr, sample, settings, 1, 4 * DBMS_DEFAULT_BUFFER_SIZE);
-            },
-            [](SeekableReadBufferFactoryPtr buf_factory,
+            [](ReadBuffer * buf,
+               SeekableReadBufferFactoryPtr buf_factory,
                const Block & sample,
                const FormatSettings & settings,
                const ReadSettings& read_settings,
                bool is_remote_fs,
-               ThreadPoolCallbackRunner<void> /* io_schedule */,
                size_t /* max_download_threads */,
                size_t max_parsing_threads)
             {
                 size_t min_bytes_for_seek = is_remote_fs ? read_settings.remote_read_min_bytes_for_seek : 8 * 1024;
                 return std::make_shared<ParquetBlockInputFormat>(
-                    nullptr,
+                    buf,
                     std::move(buf_factory),
                     sample,
                     settings,

@@ -57,7 +57,8 @@ public:
         bool use_external_buffer = false,
         size_t offset_ = 0,
         size_t read_until_position_ = 0,
-        bool restricted_seek_ = false);
+        bool restricted_seek_ = false,
+        std::optional<size_t> file_size = std::nullopt);
 
     bool nextImpl() override;
 

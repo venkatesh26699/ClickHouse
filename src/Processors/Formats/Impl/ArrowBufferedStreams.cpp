@@ -99,7 +99,8 @@ arrow::Future<std::shared_ptr<arrow::Buffer>> RandomAccessFileFromSeekableReadBu
 
 arrow::Status RandomAccessFileFromSeekableReadBuffer::Seek(int64_t position)
 {
-    if (avoid_buffering) {
+    if (avoid_buffering)
+    {
         // Seeking to a position above a previous setReadUntilPosition() confuses some of the
         // ReadBuffer implementations.
         in.setReadUntilEnd();
@@ -147,11 +148,13 @@ arrow::Status ArrowInputStreamFromReadBuffer::Close()
 
 RandomAccessFileFromManyReadBuffers::RandomAccessFileFromManyReadBuffers(SeekableReadBufferFactory & factory) : buf_factory(factory) {}
 
-arrow::Result<int64_t> RandomAccessFileFromManyReadBuffers::GetSize() {
+arrow::Result<int64_t> RandomAccessFileFromManyReadBuffers::GetSize()
+{
     return buf_factory.getFileSize();
 }
 
-arrow::Result<int64_t> RandomAccessFileFromManyReadBuffers::ReadAt(int64_t position, int64_t nbytes, void* out) {
+arrow::Result<int64_t> RandomAccessFileFromManyReadBuffers::ReadAt(int64_t position, int64_t nbytes, void* out)
+{
     std::unique_lock lock(mutex);
     if (free_bufs.empty())
         free_bufs.push_back(buf_factory.getReader());
@@ -173,7 +176,8 @@ arrow::Result<int64_t> RandomAccessFileFromManyReadBuffers::ReadAt(int64_t posit
     return static_cast<int64_t>(bytes_read);
 }
 
-arrow::Result<std::shared_ptr<arrow::Buffer>> RandomAccessFileFromManyReadBuffers::ReadAt(int64_t position, int64_t nbytes) {
+arrow::Result<std::shared_ptr<arrow::Buffer>> RandomAccessFileFromManyReadBuffers::ReadAt(int64_t position, int64_t nbytes)
+{
     ARROW_ASSIGN_OR_RAISE(auto buffer, arrow::AllocateResizableBuffer(nbytes))
     ARROW_ASSIGN_OR_RAISE(int64_t bytes_read, ReadAt(position, nbytes, buffer->mutable_data()))
 
@@ -183,11 +187,13 @@ arrow::Result<std::shared_ptr<arrow::Buffer>> RandomAccessFileFromManyReadBuffer
     return buffer;
 }
 
-arrow::Future<std::shared_ptr<arrow::Buffer>> RandomAccessFileFromManyReadBuffers::ReadAsync(const arrow::io::IOContext&, int64_t position, int64_t nbytes) {
+arrow::Future<std::shared_ptr<arrow::Buffer>> RandomAccessFileFromManyReadBuffers::ReadAsync(const arrow::io::IOContext&, int64_t position, int64_t nbytes)
+{
     return arrow::Future<std::shared_ptr<arrow::Buffer>>::MakeFinished(ReadAt(position, nbytes));
 }
 
-arrow::Status RandomAccessFileFromManyReadBuffers::Close() {
+arrow::Status RandomAccessFileFromManyReadBuffers::Close()
+{
     chassert(is_open);
     is_open = false;
     return arrow::Status::OK();
@@ -214,13 +220,23 @@ std::shared_ptr<arrow::io::RandomAccessFile> asArrowFile(
             if (res == 0 && S_ISREG(stat.st_mode))
                 return std::make_shared<RandomAccessFileFromSeekableReadBuffer>(*fd_in, stat.st_size, avoid_buffering);
     }
-    else if (dynamic_cast<SeekableReadBuffer *>(&in) && isBufferWithFileSize(in))
+    else if (auto seekable_in = dynamic_cast<SeekableReadBuffer *>(&in);
+             seekable_in && settings.seekable_read && isBufferWithFileSize(in) &&
+             seekable_in->checkIfActuallySeekable())
     {
-        if (settings.seekable_read)
             return std::make_shared<RandomAccessFileFromSeekableReadBuffer>(in, std::nullopt, avoid_buffering);
     }
 
     // fallback to loading the entire file in memory
+    return asArrowFileLoadIntoMemory(in, is_cancelled, format_name, magic_bytes);
+}
+
+std::shared_ptr<arrow::io::RandomAccessFile> asArrowFileLoadIntoMemory(
+    ReadBuffer & in,
+    std::atomic<int> & is_cancelled,
+    const std::string & format_name,
+    const std::string & magic_bytes)
+{
     std::string file_data;
     {
         PeekableReadBuffer buf(in);

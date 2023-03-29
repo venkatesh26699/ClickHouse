@@ -14,6 +14,7 @@
 
 #include <DataTypes/DataTypeNullable.h>
 #include <DataTypes/DataTypeLowCardinality.h>
+#include <DataTypes/DataTypesNumber.h>
 
 #include <Interpreters/HashJoin.h>
 #include <Interpreters/JoinUtils.h>
@@ -97,14 +98,14 @@ namespace JoinStuff
         }
     }
 
-    template <bool use_flags, bool multiple_disjuncts, typename FindResult>
+    template <bool use_flags, bool flag_per_row, typename FindResult>
     void JoinUsedFlags::setUsed(const FindResult & f)
     {
         if constexpr (!use_flags)
             return;
 
         /// Could be set simultaneously from different threads.
-        if constexpr (multiple_disjuncts)
+        if constexpr (flag_per_row)
         {
             auto & mapped = f.getMapped();
             flags[mapped.block][mapped.row_num].store(true, std::memory_order_relaxed);
@@ -115,30 +116,30 @@ namespace JoinStuff
         }
     }
 
-    template <bool use_flags, bool multiple_disjuncts>
+    template <bool use_flags, bool flag_per_row>
     void JoinUsedFlags::setUsed(const Block * block, size_t row_num, size_t offset)
     {
         if constexpr (!use_flags)
             return;
 
-        /// Could be set simultaneously from different threads.
-        if constexpr (multiple_disjuncts)
+        /// Can be set simultaneously from different threads.
+        if constexpr (flag_per_row)
         {
-            flags[block][row_num].store(true, std::memory_order_relaxed);
+            flags[block][row_num].store(true);
         }
         else
         {
-            flags[nullptr][offset].store(true, std::memory_order_relaxed);
+            flags[nullptr][offset].store(true);
         }
     }
 
-    template <bool use_flags, bool multiple_disjuncts, typename FindResult>
+    template <bool use_flags, bool flag_per_row, typename FindResult>
     bool JoinUsedFlags::getUsed(const FindResult & f)
     {
         if constexpr (!use_flags)
             return true;
 
-        if constexpr (multiple_disjuncts)
+        if constexpr (flag_per_row)
         {
             auto & mapped = f.getMapped();
             return flags[mapped.block][mapped.row_num].load();
@@ -149,13 +150,13 @@ namespace JoinStuff
         }
     }
 
-    template <bool use_flags, bool multiple_disjuncts, typename FindResult>
+    template <bool use_flags, bool flag_per_row, typename FindResult>
     bool JoinUsedFlags::setUsedOnce(const FindResult & f)
     {
         if constexpr (!use_flags)
             return true;
 
-        if constexpr (multiple_disjuncts)
+        if constexpr (flag_per_row)
         {
             auto & mapped = f.getMapped();
 
@@ -644,7 +645,7 @@ namespace
 
     Block getRowFromBlock(const Block & src_block, size_t row_idx, size_t repeat, const NameSet & required_columns)
     {
-        Block res = src_block.cloneEmpty();
+        Block res;
         for (const auto & column : src_block)
         {
             if (!required_columns.empty() && !required_columns.contains(column.name))
@@ -1072,8 +1073,12 @@ struct JoinFeatures
     static constexpr bool inner = KIND == JoinKind::Inner;
     static constexpr bool full = KIND == JoinKind::Full;
 
+    /// If we need to replicate any rows from the left table.
     static constexpr bool need_replication = is_all_join || (is_any_join && right) || (is_semi_join && right);
+
+    /// If we need to filter any rows from the left table.
     static constexpr bool need_filter = !need_replication && (inner || right || (is_semi_join && left) || (is_anti_join && left));
+
     static constexpr bool add_missing = (left || full) && !is_semi_join;
 
     static constexpr bool need_flags = MapGetter<KIND, STRICTNESS>::flagged;
@@ -1221,6 +1226,60 @@ void setUsed(IColumn::Filter & filter [[maybe_unused]], size_t pos [[maybe_unuse
         filter[pos] = 1;
 }
 
+template <typename Mapped>
+size_t joinWithExtraCinditions(
+    const Mapped & mapped,
+    AddedColumns & added_columns,
+    const ExpressionActionsPtr & filter_expression_actions,
+    size_t row_idx)
+{
+    size_t matched_rows = 0;
+    auto required_columns_list = filter_expression_actions->getRequiredColumns();
+    NameSet required_columns(required_columns_list.begin(), required_columns_list.end());
+
+    if (!mapped.begin().ok())
+        return matched_rows;
+
+    const Block & sample_right_block = *mapped.begin()->block;
+
+    MutableColumns right_columns = sample_right_block.cloneEmptyColumns();
+    if (right_columns.empty())
+        return matched_rows;
+
+    for (auto it = mapped.begin(); it.ok(); ++it)
+    {
+        for (size_t j = 0; j < right_columns.size(); ++j)
+        {
+            const auto & column = it->block->getByPosition(j);
+            if (required_columns.contains(column.name))
+                right_columns[j]->insertFrom(*column.column, it->row_num);
+        }
+    }
+
+    Block matches_block = getRowFromBlock(added_columns.left_block, row_idx, right_columns[0]->size(), required_columns);
+    for (size_t j = 0; j < right_columns.size(); ++j)
+    {
+        const auto & sample_column = sample_right_block.getByPosition(j);
+        if (!required_columns.contains(sample_column.name))
+            continue;
+        matches_block.insert({std::move(right_columns[j]), sample_column.type, sample_column.name});
+    }
+
+    filter_expression_actions->execute(matches_block);
+    const auto & matches_column = assert_cast<const ColumnUInt8 &>(*matches_block.getByPosition(0).column).getData();
+
+    size_t match_idx = 0;
+    for (auto it = mapped.begin(); it.ok(); ++it, ++match_idx)
+    {
+        if (!matches_column[match_idx])
+            continue;
+        added_columns.appendFromBlock<false>(*it->block, it->row_num);
+        ++matched_rows;
+    }
+
+    return matched_rows;
+}
+
 /// Joins right table columns which indexes are present in right_indexes using specified map.
 /// Makes filter (1 if row presented in right table) and returns offsets to replicate (for ALL JOINS).
 template <JoinKind KIND, JoinStrictness STRICTNESS, typename KeyGetter, typename Map, bool need_filter, bool has_null_map, bool multiple_disjuncts>
@@ -1251,6 +1310,7 @@ NO_INLINE IColumn::Filter joinRightColumns(
         bool null_element_found = false;
 
         KnownRowsHolder<multiple_disjuncts> known_rows;
+
         for (size_t onexpr_idx = 0; onexpr_idx < added_columns.join_on_keys.size(); ++onexpr_idx)
         {
             const auto & join_keys = added_columns.join_on_keys[onexpr_idx];
@@ -1275,6 +1335,8 @@ NO_INLINE IColumn::Filter joinRightColumns(
                     if (filter_expression_actions)
                     {
                         chassert(!multiple_disjuncts && !join_features.need_flags);
+                        size_t matched_rows = joinWithExtraCinditions(mapped, added_columns, filter_expression_actions, i);
+                        current_offset += matched_rows;
 
                         auto required_columns_list = filter_expression_actions->getRequiredColumns();
                         NameSet required_columns(required_columns_list.begin(), required_columns_list.end());
@@ -1366,7 +1428,7 @@ NO_INLINE IColumn::Filter joinRightColumns(
                 }
                 else if constexpr (join_features.is_any_join && join_features.full)
                 {
-                    /// TODO
+                    /// Not supported because has no sense
                 }
                 else if constexpr (join_features.is_anti_join)
                 {
@@ -1385,6 +1447,9 @@ NO_INLINE IColumn::Filter joinRightColumns(
                     }
                 }
             }
+
+            if (!multiple_disjuncts)
+                break;
         }
 
         if constexpr (has_null_map)
@@ -2162,19 +2227,36 @@ BlocksList HashJoin::releaseJoinedBlocks(bool restructure)
 void HashJoin::addMixedFilterCondition(ExpressionActionsPtr additional_filter_expression_actions_)
 {
     if (additional_filter_expression_actions)
-        throw Exception(ErrorCodes::LOGICAL_ERROR,
-            "HashJoin::addMixedFilterCondition called twice");
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "HashJoin::addMixedFilterCondition called twice");
 
-    if (strictness != JoinStrictness::All)
+    if (!additional_filter_expression_actions_)
+        throw Exception(ErrorCodes::LOGICAL_ERROR, "HashJoin::addMixedFilterCondition called with nullptr");
+
+    Block expression_sample_block = additional_filter_expression_actions_->getSampleBlock();
+
+    if (expression_sample_block.columns() != 1)
     {
-        String column_name;
-        if (auto sample_block = additional_filter_expression_actions_->getSampleBlock(); sample_block.columns() == 1)
-            column_name = " '" + sample_block.getByPosition(0).name + "'";
-        throw Exception(ErrorCodes::NOT_IMPLEMENTED, "Non equi condition{} from JOIN ON section is supported only for ALL JOIN", column_name);
+        throw Exception(ErrorCodes::LOGICAL_ERROR,
+            "Unexpected expression in JOIN ON section. Expected single column, got '{}'",
+            expression_sample_block.dumpStructure());
+    }
+
+    if (!expression_sample_block.getByPosition(0).type->equals(*std::make_shared<DataTypeUInt8>()))
+    {
+        throw Exception(ErrorCodes::LOGICAL_ERROR,
+            "Unexpected expression in JOIN ON section. Expected boolean (UInt8), got '{}'",
+            expression_sample_block.getByPosition(0).type->getName());
+    }
+
+    bool is_supported = (strictness == JoinStrictness::All) && (kind == JoinKind::Inner && kind == JoinKind::Left);
+    if (!is_supported)
+    {
+        throw Exception(ErrorCodes::NOT_IMPLEMENTED,
+            "Non equi condition '{}' from JOIN ON section is supported only for ALL INNER and LEFT JOINs",
+            expression_sample_block.getByPosition(0).name);
     }
 
     additional_filter_expression_actions = std::move(additional_filter_expression_actions_);
-    LOG_DEBUG(&Poco::Logger::get("XXXX"), "{}:{} {}", __FILE__, __LINE__, additional_filter_expression_actions->dumpActions());
 }
 
 const ColumnWithTypeAndName & HashJoin::rightAsofKeyColumn() const

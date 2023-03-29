@@ -182,7 +182,7 @@ struct JoinClausesAndActions
     /// Right join expressions actions
     ActionsDAGPtr right_join_expressions_actions;
 
-    ActionsDAGPtr both_join_expressions_actions;
+    ActionsDAGPtr mixed_join_expressions_actions;
 };
 
 /** Calculate join clauses and actions for JOIN ON section.

@@ -444,15 +444,32 @@ JoinClausesAndActions buildJoinClausesAndActions(const ColumnsWithTypeAndName & 
             add_necessary_name_if_needed(JoinTableSide::Right, dag_filter_condition_node->result_name);
         }
 
-        const auto & mixed_condition_nodes = join_clause.getMixedFilterConditionNodes();
+        auto merge_actions_with_and = [&](ActionsDAG::NodeRawConstPtrs & nodes, ActionsDAGPtr & expression_actions) -> const ActionsDAG::Node *
+        {
+            const ActionsDAG::Node * dag_node = nullptr;
+
+            if (nodes.empty())
+                return dag_node;
+
+            if (nodes.size() == 1)
+            {
+                dag_node = nodes[0];
+            }
+            else
+            {
+                auto and_function = FunctionFactory::instance().get("and", planner_context->getQueryContext());
+                dag_node = &expression_actions->addFunction(and_function, nodes, {});
+            }
+            nodes = {dag_node};
+
+            return dag_node;
+        };
+
+        auto & mixed_condition_nodes = join_clause.getMixedFilterConditionNodes();
         if (!mixed_condition_nodes.empty())
         {
-            auto mixed_condition_dag = std::make_shared<ActionsDAG>();
-            for (const auto & condition_node : mixed_condition_nodes)
-            {
-                mixed_condition_dag = ActionsDAG::cloneNode(condition_node);
-                // TODO: mixed_condition_dag->mergeInplace(std::move(*new_dag));
-            }
+            ActionsDAGPtr mixed_condition_dag = ActionsDAG::buildFilterActionsDAG(mixed_condition_nodes, {}, {});
+            UNUSED(merge_actions_with_and);
 
             for (const auto & node : mixed_condition_dag->getNodes())
             {
@@ -479,8 +496,7 @@ JoinClausesAndActions buildJoinClausesAndActions(const ColumnsWithTypeAndName & 
                 }
             }
 
-            mixed_condition_dag->projectInput();
-            result.both_join_expressions_actions = mixed_condition_dag;
+            result.mixed_join_expressions_actions = mixed_condition_dag;
         }
 
         assert(join_clause.getLeftKeyNodes().size() == join_clause.getRightKeyNodes().size());

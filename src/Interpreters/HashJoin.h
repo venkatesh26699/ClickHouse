@@ -42,8 +42,14 @@ class JoinUsedFlags
     using RawBlockPtr = const Block *;
     using UsedFlagsForBlock = std::vector<std::atomic_bool>;
 
-    /// For multiple dijuncts each empty in hashmap stores flags for particular block
-    /// For single dicunct we store all flags in `nullptr` entry, index is the offset in FindResult
+    /*
+     * For simple cases we store all flags in `nullptr` entry.
+     * Index is the offset from FindResult (corresponds to internal offset in hashmap)
+     * For more complex cases (multiple disjuncts, complex conditions in JOIN ON, etc) we store flags for each row in block.
+     * Index corresponds to row number in particular block.
+     *
+     * Behaviour is controlled by `flag_per_row` template parameter.
+     */
     std::unordered_map<RawBlockPtr, UsedFlagsForBlock> flags;
 
     bool need_flags;
@@ -61,16 +67,16 @@ public:
     bool getUsedSafe(size_t i) const;
     bool getUsedSafe(const Block * block_ptr, size_t row_idx) const;
 
-    template <bool use_flags, bool multiple_disjuncts, typename T>
+    template <bool use_flags, bool flag_per_row, typename T>
     void setUsed(const T & f);
 
-    template <bool use_flags, bool multiple_disjunct>
+    template <bool use_flags, bool flag_per_row>
     void setUsed(const Block * block, size_t row_num, size_t offset);
 
-    template <bool use_flags, bool multiple_disjuncts, typename T>
+    template <bool use_flags, bool flag_per_row, typename T>
     bool getUsed(const T & f);
 
-    template <bool use_flags, bool multiple_disjuncts, typename T>
+    template <bool use_flags, bool flag_per_row, typename T>
     bool setUsedOnce(const T & f);
 };
 
